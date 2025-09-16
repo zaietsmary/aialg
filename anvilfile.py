@@ -18,12 +18,19 @@ class Form1(Form1Template):
     self.text_area_1.text = f"Файл {file_name} завантажено!\nРозмір: {len(file.get_bytes())} байт"
 
     try:
-      vector, norm_vector, bw_file = anvil.server.call('process_image', file)
-      self.image_1.source = bw_file
-      self.text_area_vector.text = str(vector)
-      self.text_area_norm.text = str(norm_vector)
+      result = anvil.server.call('classify_image', file)
+      self.image_1.source = result["image_blob"]
+      self.text_area_vector.text = str(result["vector"])
+      self.text_area_norm.text = str(result["normalized_vector"])
+      self.text_area_class.text = f"Найближчий клас: {result['best_class']}\n"
+      self.text_area_class.text += "Відстані до всіх еталонів:\n"
+      for k, v in result["distances"].items():
+        self.text_area_class.text += f"{k}: {v:.2f}\n"
+
     except Exception as e:
       self.text_area_1.text = f"Помилка при обробці зображення: {e}"
+
+
 
 
 
