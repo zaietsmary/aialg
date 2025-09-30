@@ -19,19 +19,21 @@ test_table_data = pd.DataFrame(columns=["Тип", "Значення"])
 cluster_stats_table = pd.DataFrame(columns=["Клас", "Мінімум", "Максимум", "Середнє", "Дисперсія"])
 class_a_images = []
 class_b_images = []
+class_c_images = []
 table_data_a = pd.DataFrame(columns=["Зразок", "Файл", "Абсолютний вектор", "Нормований вектор"])
 table_data_b = pd.DataFrame(columns=["Зразок", "Файл", "Абсолютний вектор", "Нормований вектор"])
+table_data_c = pd.DataFrame(columns=["Зразок", "Файл", "Абсолютний вектор", "Нормований вектор"])
 training_data = {
     "Class A": [],
-    "Class B": []
+    "Class B": [],
+    "Class C": []
 }
 training_stats = {
     "Class A": {},
-    "Class B": {}
+    "Class B": {},
+    "Class C": {}
 }
-w = np.random.rand(4*5).tolist()
-b = 0
-r = 0.1
+W = None
 
 def vector_calculation(img, grid_rows: int = 4, grid_cols: int = 5):
     pixels = np.array(img.convert("L"))
@@ -50,6 +52,7 @@ def vector_calculation(img, grid_rows: int = 4, grid_cols: int = 5):
 def update_table_data(state):
     state.table_data_a = create_table_data(training_data["Class A"])
     state.table_data_b = create_table_data(training_data["Class B"])
+    state.table_data_c = create_table_data(training_data["Class C"])
 
 def create_table_data(class_data):
     if not class_data:
@@ -72,7 +75,7 @@ def update_test_table(state, vector_abs, vector_norm):
     state.test_table_data = pd.DataFrame(data)
 
 def calculate_cluster_stats():
-    for class_name in ["Class A", "Class B"]:
+    for class_name in ["Class A", "Class B", "Class C"]:
         images_data = training_data[class_name]
         if images_data:
             vectors = np.array([img_data["vector_norm"] for img_data in images_data])
@@ -85,7 +88,7 @@ def calculate_cluster_stats():
 
 def update_cluster_stats(state):
     cluster_stats = []
-    for class_name in ["Class A", "Class B"]:
+    for class_name in ["Class A", "Class B", "Class C"]:
         if class_name in training_stats:
             stats = training_stats[class_name]
             if stats:
@@ -141,10 +144,12 @@ def on_files_upload(state):
 
         state.class_a_images = [img["image"] for img in training_data["Class A"]]
         state.class_b_images = [img["image"] for img in training_data["Class B"]]
+        state.class_c_images = [img["image"] for img in training_data["Class C"]]
+
         update_table_data(state)
         calculate_cluster_stats()
         update_cluster_stats(state)
-        train_perceptron(state)
+        train_hopfield(state)
 
         state.file_info = f"✅ Додано {processed_count} фото до {current_class}"
         state.classification_result = f"Тепер у {current_class}: {len(training_data[current_class])}/10 зображень"
@@ -177,49 +182,84 @@ def on_test_file_upload(state):
     except Exception as e:
         state.recognition_result = f"Помилка: {str(e)}"
 
-def d(weight):
-    if weight > 0:
-        return 1
-    return -1
-
-def train_perceptron(state):
-    if not hasattr(state, "w"):
-        state.w = [np.random.rand() for _ in range(4 * 5)]
-        state.b = 0
-
-    if len(training_data["Class A"]) < 10 or len(training_data["Class B"]) < 10:
+def train_hopfield(state):
+    if len(training_data["Class A"]) < 10 or len(training_data["Class B"]) < 10 or len(training_data["Class C"]) < 10:
         state.classification_result = "⚠️ Недостатньо даних для навчання"
         return
 
-    classes_list = ["Class A", "Class B"]
-    for _ in range(100):
-        for class_name in classes_list:
-            for sample in training_data[class_name]:
-                x = sample["vector_norm"]
-                desired = 1 if class_name == "Class A" else -1
-                weight_sum = sum(xi * wi for xi, wi in zip(x, state.w)) + state.b
-                y = d(weight_sum)
-                if y != desired:
-                    state.w = [wi + r * (desired - y) * xi for wi, xi in zip(state.w, x)]
-                    state.b = state.b + r * (desired - y)
+    n = len(training_data["Class A"][0]["vector_norm"])
+    W = np.zeros((n, n))
+    for class_name in ["Class A", "Class B", "Class C"]:
+        for sample in training_data[class_name]:
+            x = [1 if v > 0 else -1 for v in sample["vector_norm"]]
+            for i in range(n):
+                for j in range(n):
+                    if i != j:
+                        W[i][j] += x[i] * x[j]
+
+    state.W = W
+
+def hopfield_recognize(state, x_input, max_iter=100):
+    if not hasattr(state, "W"):
+        state.recognition_result = "⚠️ Спочатку навчіть мережу"
+        return
+
+    y_state = np.copy(x_input)
+
+    for t in range(max_iter):
+        new_state = np.copy(y_state)
+        for i in range(len(y_state)):
+            s = np.dot(state.W[i], y_state)
+            new_state[i] = 1 if s >= 0 else -1
+
+        if np.array_equal(new_state, y_state):
+            break
+        y_state = new_state
+
+    return y_state
 
 def recognize_image(state):
     if not state.test_vector_norm:
-        state.recognition_result = "⚠️ Спочатку завантажте фото для розпізнавання"
+        state.recognition_result = "⚠️ Завантажте фото для розпізнавання"
+        state.predicted_class = ""
         return
 
-    x_test = np.array(state.test_vector_norm)
-    weight_sum = np.dot(x_test, state.w) + state.b
-    y = d(weight_sum)
+    if not hasattr(state, "W") or state.W is None:
+        state.recognition_result = "⚠️ Спочатку навчіть мережу"
+        state.predicted_class = ""
+        return
 
-    state.predicted_class = "Class A" if y == 1 else "Class B"
-    state.recognition_result = f"📌 Розпізнано як: {state.predicted_class}"
+    x_input = [1 if v > 0 else -1 for v in state.test_vector_norm]
+
+    final_state = hopfield_recognize(state, x_input)
+
+    if final_state is None:
+        state.recognition_result = "⚠️ Помилка під час розпізнавання"
+        state.predicted_class = ""
+        return
+
+    similarity = {}
+    for class_name in ["Class A", "Class B", "Class C"]:
+        if training_data[class_name]:
+            sims = []
+            for sample in training_data[class_name]:
+                y = [1 if v > 0 else -1 for v in sample["vector_norm"]]
+                sims.append(np.sum(np.array(y) == np.array(final_state)))
+            similarity[class_name] = max(sims)
+
+    if similarity:
+        predicted_class = max(similarity, key=similarity.get)
+    else:
+        predicted_class = "Невідомо"
+
+    state.predicted_class = predicted_class
+    state.recognition_result = f"Результат класифікації: {predicted_class}"
 
 page = """
 <|layout|columns=1 1|gap=15px|>
 
 ## Вибір класу:
-<|{selected_class}|selector|lov=Class A;Class B|label=Оберіть клас|dropdown|width=100%|>
+<|{selected_class}|selector|lov=Class A;Class B;Class C|label=Оберіть клас|dropdown|width=100%|>
 
 ## Завантаження фото (10 на клас):
 <|{uploaded_files}|file_selector|extensions=.png,.jpg,.jpeg|on_action=on_files_upload|label=Завантажте фото|multiple|width=100%|>
@@ -269,9 +309,22 @@ page = """
 <|{class_b_images[9] if len(class_b_images) > 9 else None}|image|height=120px|width=120px|>
 <|{table_data_b}|table|page_size=5|width=100%|>
 
+### Class C
+<|layout|columns=1 1 1 1 1|gap=15px|>
+<|{class_c_images[0] if len(class_c_images) > 0 else None}|image|height=120px|width=120px|>
+<|{class_c_images[1] if len(class_c_images) > 1 else None}|image|height=120px|width=120px|>
+<|{class_c_images[2] if len(class_c_images) > 2 else None}|image|height=120px|width=120px|>
+<|{class_c_images[3] if len(class_c_images) > 3 else None}|image|height=120px|width=120px|>
+<|{class_c_images[4] if len(class_c_images) > 4 else None}|image|height=120px|width=120px|>
+<|layout|columns=1 1 1 1 1|gap=15px|>
+<|{class_c_images[5] if len(class_c_images) > 5 else None}|image|height=120px|width=120px|>
+<|{class_c_images[6] if len(class_c_images) > 6 else None}|image|height=120px|width=120px|>
+<|{class_c_images[7] if len(class_c_images) > 7 else None}|image|height=120px|width=120px|>
+<|{class_c_images[8] if len(class_c_images) > 8 else None}|image|height=120px|width=120px|>
+<|{class_c_images[9] if len(class_c_images) > 9 else None}|image|height=120px|width=120px|>
+<|{table_data_c}|table|page_size=5|width=100%|>
 """
 
 if __name__ == "__main__":
     gui = Gui(page)
     gui.run(debug=True, port=5000)
-
