@@ -33,7 +33,13 @@ training_stats = {
     "Class B": {},
     "Class C": {}
 }
-W = None
+hamming_W = None
+hamming_B = None
+hamming_map = None
+hamming_m = 0
+hamming_n = 0
+debug_s1 = None
+debug_Y = None
 
 def vector_calculation(img, grid_rows: int = 4, grid_cols: int = 5):
     pixels = np.array(img.convert("L"))
@@ -94,12 +100,13 @@ def update_cluster_stats(state):
             if stats:
                 cluster_stats.append({
                     "Клас": class_name,
-                    "Мінімум": str([round(x, 4) for x in stats["min"]]),
-                    "Максимум": str([round(x, 4) for x in stats["max"]]),
-                    "Середнє": str([round(x, 4) for x in stats["mean"]]),
-                    "Дисперсія": str([round(x, 4) for x in stats["variance"]])
+                    "Мінімум": str([round(float(x), 4) for x in stats["min"]]),
+                    "Максимум": str([round(float(x), 4) for x in stats["max"]]),
+                    "Середнє": str([round(float(x), 4) for x in stats["mean"]]),
+                    "Дисперсія": str([round(float(x), 4) for x in stats["variance"]])
                 })
     state.cluster_stats_table = pd.DataFrame(cluster_stats)
+
 
 def on_files_upload(state):
     try:
@@ -149,7 +156,7 @@ def on_files_upload(state):
         update_table_data(state)
         calculate_cluster_stats()
         update_cluster_stats(state)
-        train_hopfield(state)
+        train_hamming(state)
 
         state.file_info = f"✅ Додано {processed_count} фото до {current_class}"
         state.classification_result = f"Тепер у {current_class}: {len(training_data[current_class])}/10 зображень"
@@ -182,78 +189,96 @@ def on_test_file_upload(state):
     except Exception as e:
         state.recognition_result = f"Помилка: {str(e)}"
 
-def train_hopfield(state):
-    if len(training_data["Class A"]) < 10 or len(training_data["Class B"]) < 10 or len(training_data["Class C"]) < 10:
-        state.classification_result = "⚠️ Недостатньо даних для навчання"
-        return
-
-    n = len(training_data["Class A"][0]["vector_norm"])
-    W = np.zeros((n, n))
+def train_hamming(state):
+    patterns = []
+    pat_map = []
     for class_name in ["Class A", "Class B", "Class C"]:
-        for sample in training_data[class_name]:
-            x = [1 if v > 0 else -1 for v in sample["vector_norm"]]
-            for i in range(n):
-                for j in range(n):
-                    if i != j:
-                        W[i][j] += x[i] * x[j]
+        for idx, sample in enumerate(training_data[class_name]):
+            x = np.array([1 if v > 0 else -1 for v in sample["vector_norm"]], dtype=float)
+            patterns.append(x)
+            pat_map.append((class_name, idx))
 
-    state.W = W
-
-def hopfield_recognize(state, x_input, max_iter=100):
-    if not hasattr(state, "W"):
-        state.recognition_result = "⚠️ Спочатку навчіть мережу"
+    if not patterns:
+        state.hamming_W = None
+        state.hamming_T = None
+        state.hamming_map = None
+        state.hamming_m = 0
+        state.hamming_n = 0
+        state.classification_result = "⚠️ Немає патернів для Hamming"
         return
 
-    y_state = np.copy(x_input)
+    patterns = np.array(patterns)
+    m = patterns.shape[0]
+    n = patterns.shape[1]
 
-    for t in range(max_iter):
-        new_state = np.copy(y_state)
-        for i in range(len(y_state)):
-            s = np.dot(state.W[i], y_state)
-            new_state[i] = 1 if s >= 0 else -1
+    W = np.zeros((n, m), dtype=float)
+    for k in range(m):
+        W[:, k] = patterns[k] / 2.0
 
-        if np.array_equal(new_state, y_state):
+    B = np.full(m, n / 2.0, dtype=float)
+
+    state.hamming_W = W
+    state.hamming_B = B
+    state.hamming_map = pat_map
+    state.hamming_m = m
+    state.hamming_n = n
+    state.classification_result = f"✅ Hamming: навчено {m} патернів"
+
+def hamming_recognize(state, x_input_norm, max_iter=100, eps=None):
+    if not hasattr(state, "hamming_W") or state.hamming_W is None:
+        return None, None
+
+    W = state.hamming_W
+    B = state.hamming_B
+    m = state.hamming_m
+    n = state.hamming_n
+
+    if eps is None:
+        eps = min(0.5 / max(1, m), 0.01)
+
+    x = np.array([1 if v > 0 else -1 for v in x_input_norm], dtype=float)
+
+    s1 = np.dot(x, W) + B
+    Y = s1.copy()
+
+    for _ in range(max_iter):
+        Y_prev = Y.copy()
+        sumY = np.sum(Y_prev)
+        S = Y_prev - eps * (sumY - Y_prev)
+        Y = np.where(S > 0, S, 0.0)
+        if np.allclose(Y, Y_prev, atol=1e-9):
             break
-        y_state = new_state
 
-    return y_state
+    state.debug_s1 = s1.tolist()
+    state.debug_Y = Y.tolist()
 
-def recognize_image(state):
+    if np.all(Y <= 0):
+        return None, Y
+
+    winner_idx = int(np.argmax(Y))
+    return winner_idx, Y
+
+def recognize_image_hamming(state):
     if not state.test_vector_norm:
         state.recognition_result = "⚠️ Завантажте фото для розпізнавання"
         state.predicted_class = ""
         return
 
-    if not hasattr(state, "W") or state.W is None:
-        state.recognition_result = "⚠️ Спочатку навчіть мережу"
+    if not hasattr(state, "hamming_W") or state.hamming_W is None:
+        state.recognition_result = "⚠️ Спочатку навчіть Hamming мережу"
         state.predicted_class = ""
         return
 
-    x_input = [1 if v > 0 else -1 for v in state.test_vector_norm]
+    winner_idx, Y_final = hamming_recognize(state, state.test_vector_norm, max_iter=200, eps=None)
 
-    final_state = hopfield_recognize(state, x_input)
-
-    if final_state is None:
-        state.recognition_result = "⚠️ Помилка під час розпізнавання"
-        state.predicted_class = ""
+    if winner_idx is None:
+        state.predicted_class = "Невідомо"
+        state.recognition_result = "Результат: Немає схожого патерну"
         return
 
-    similarity = {}
-    for class_name in ["Class A", "Class B", "Class C"]:
-        if training_data[class_name]:
-            sims = []
-            for sample in training_data[class_name]:
-                y = [1 if v > 0 else -1 for v in sample["vector_norm"]]
-                sims.append(np.sum(np.array(y) == np.array(final_state)))
-            similarity[class_name] = max(sims)
-
-    if similarity:
-        predicted_class = max(similarity, key=similarity.get)
-    else:
-        predicted_class = "Невідомо"
-
-    state.predicted_class = predicted_class
-    state.recognition_result = f"Результат класифікації: {predicted_class}"
+    class_name, sample_idx = state.hamming_map[winner_idx]
+    state.predicted_class = class_name
+    state.recognition_result = f"Результат Hamming: {class_name} (патерн #{winner_idx})"
 
 page = """
 <|layout|columns=1 1|gap=15px|>
@@ -269,7 +294,7 @@ page = """
 ## Завантаження для класифікації:
 <|{test_image}|file_selector|extensions=.png,.jpg,.jpeg|on_action=on_test_file_upload|label=Завантажте тестове фото|width=100%|>
 <|{test_image}|image|height=200px|width=200px|>
-<|button|label=Розпізнати|on_action=recognize_image|>
+<|button|label=Розпізнати|on_action=recognize_image_hamming|>
 <|{recognition_result}|text|>
 
 ## Вектори ознак тестового зображення:
@@ -328,3 +353,4 @@ page = """
 if __name__ == "__main__":
     gui = Gui(page)
     gui.run(debug=True, port=5000)
+
